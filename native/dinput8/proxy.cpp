@@ -1,6 +1,9 @@
 #define DIRECTINPUT_VERSION 0x0800
 #define INITGUID
 
+#include <winsock2.h>
+#include <ws2tcpip.h>
+
 #include <windows.h>
 #include <dinput.h>
 
@@ -12,10 +15,99 @@
 #include <string>
 #include <type_traits>
 
+#pragma comment(lib, "ws2_32.lib")
+
+// Forward declaration
+static void log_message(const char* format, ...);
+
 
 // -----------------------------------------------------------------------------
 // Globals / logging
 // -----------------------------------------------------------------------------
+
+static INIT_ONCE g_udp_init_once = INIT_ONCE_STATIC_INIT;
+static SOCKET g_udp_socket = INVALID_SOCKET;
+static sockaddr_in g_udp_target{};
+
+
+static BOOL CALLBACK init_ffb_udp(
+    PINIT_ONCE,
+    PVOID,
+    PVOID*
+)
+{
+    WSADATA data{};
+
+    if (WSAStartup(MAKEWORD(2, 2), &data) != 0)
+    {
+        log_message("FFB UDP: WSAStartup failed");
+        return TRUE;
+    }
+
+    g_udp_socket = socket(
+        AF_INET,
+        SOCK_DGRAM,
+        IPPROTO_UDP
+    );
+
+    if (g_udp_socket == INVALID_SOCKET)
+    {
+        log_message("FFB UDP: socket creation failed");
+        return TRUE;
+    }
+
+    g_udp_target.sin_family = AF_INET;
+    g_udp_target.sin_port = htons(26725);
+
+    inet_pton(
+        AF_INET,
+        "127.0.0.1",
+        &g_udp_target.sin_addr
+    );
+
+    log_message("FFB UDP bridge ready");
+
+    return TRUE;
+}
+
+
+static void send_ffb_force(LONG magnitude)
+{
+    InitOnceExecuteOnce(
+        &g_udp_init_once,
+        init_ffb_udp,
+        nullptr,
+        nullptr
+    );
+
+    if (g_udp_socket == INVALID_SOCKET)
+        return;
+
+    magnitude = std::clamp<LONG>(
+        magnitude,
+        -10000,
+        10000
+    );
+
+    // Python bridge expects network-byte-order signed int32.
+    LONG packet =
+        static_cast<LONG>(
+            htonl(
+                static_cast<ULONG>(magnitude)
+            )
+        );
+
+    sendto(
+        g_udp_socket,
+        reinterpret_cast<const char*>(&packet),
+        sizeof(packet),
+        0,
+        reinterpret_cast<const sockaddr*>(
+            &g_udp_target
+        ),
+        sizeof(g_udp_target)
+    );
+}
 
 static HMODULE g_module = nullptr;
 static SRWLOCK g_log_lock = SRWLOCK_INIT;
@@ -29,6 +121,12 @@ DEFINE_GUID(
     0x88, 0xf9, 0x25, 0x67, 0xb8, 0xe1, 0x4a, 0x21
 );
 
+static bool is_diprop(REFGUID property, UINT_PTR id)
+{
+    // DirectInput DIPROP_* values are pseudo-GUIDs whose address
+    // is the property ID, not actual GUID structures.
+    return reinterpret_cast<UINT_PTR>(&property) == id;
+}
 
 static std::wstring log_path()
 {
@@ -170,6 +268,7 @@ public:
 
     ~FakeConstantForceEffect()
     {
+        send_ffb_force(0);
         log_message("FakeConstantForceEffect destroyed");
     }
 
@@ -325,6 +424,11 @@ public:
             );
         }
 
+        if (playing_)
+        {
+            send_ffb_force(magnitude_);
+        }
+
         return DI_OK;
     }
 
@@ -344,6 +448,8 @@ public:
             flags
         );
 
+         send_ffb_force(magnitude_);
+
         return DI_OK;
     }
 
@@ -351,6 +457,8 @@ public:
     HRESULT STDMETHODCALLTYPE Stop() override
     {
         playing_ = false;
+
+        send_ffb_force(0);
 
         log_message("Effect Stop");
 
@@ -381,6 +489,8 @@ public:
     HRESULT STDMETHODCALLTYPE Unload() override
     {
         playing_ = false;
+
+        send_ffb_force(0);
 
         log_message("Effect Unload");
 
@@ -633,22 +743,43 @@ public:
         LPDIDEVCAPS caps
     ) override
     {
+        if (!caps)
+            return E_POINTER;
+
+        const DWORD caller_size = caps->dwSize;
+
+        log_message(
+            "GetCapabilities: caller dwSize=%lu",
+            caller_size
+        );
+
         HRESULT hr =
             real_->GetCapabilities(caps);
 
-        if (SUCCEEDED(hr) && caps)
+        if (SUCCEEDED(hr))
         {
+            // dwFlags exists in both the legacy DX3 structure
+            // and the modern structure.
             caps->dwFlags |= DIDC_FORCEFEEDBACK;
 
-            // Microseconds.
-            caps->dwFFSamplePeriod = 1000;
-            caps->dwFFMinTimeResolution = 1000;
+            // Only write the newer fields if the caller actually
+            // supplied the full modern DIDEVCAPS structure.
+            if (caller_size >= sizeof(DIDEVCAPS))
+            {
+                caps->dwFFSamplePeriod = 1000;
+                caps->dwFFMinTimeResolution = 1000;
+                caps->dwFFDriverVersion = 0x00010000;
 
-            caps->dwFFDriverVersion = 0x00010000;
-
-            log_message(
-                "GetCapabilities: advertising DIDC_FORCEFEEDBACK"
-            );
+                log_message(
+                    "GetCapabilities: full structure; advertising FFB timing fields"
+                );
+            }
+            else
+            {
+                log_message(
+                    "GetCapabilities: legacy structure; advertising FFB flag only"
+                );
+            }
         }
 
         return hr;
@@ -661,6 +792,11 @@ public:
         DWORD flags
     ) override
     {
+        log_message(
+            "EnumObjects flags=0x%08lX",
+            flags
+        );
+
         if (!callback)
             return DIERR_INVALIDPARAM;
 
@@ -739,38 +875,38 @@ public:
         if (!header)
             return E_POINTER;
 
-        if (IsEqualGUID(property, DIPROP_FFGAIN))
+        if (is_diprop(property, 7)) // DIPROP_FFGAIN
         {
             auto* value =
-                reinterpret_cast<LPDIPROPDWORD>(
-                    header
-                );
+                reinterpret_cast<LPDIPROPDWORD>(header);
 
             value->dwData = ff_gain_;
 
+            log_message("GetProperty: DIPROP_FFGAIN");
+
             return DI_OK;
         }
 
-        if (IsEqualGUID(property, DIPROP_FFLOAD))
+        if (is_diprop(property, 8)) // DIPROP_FFLOAD
         {
             auto* value =
-                reinterpret_cast<LPDIPROPDWORD>(
-                    header
-                );
+                reinterpret_cast<LPDIPROPDWORD>(header);
 
             value->dwData = 0;
 
+            log_message("GetProperty: DIPROP_FFLOAD");
+
             return DI_OK;
         }
 
-        if (IsEqualGUID(property, DIPROP_AUTOCENTER))
+        if (is_diprop(property, 9)) // DIPROP_AUTOCENTER
         {
             auto* value =
-                reinterpret_cast<LPDIPROPDWORD>(
-                    header
-                );
+                reinterpret_cast<LPDIPROPDWORD>(header);
 
             value->dwData = autocenter_;
+
+            log_message("GetProperty: DIPROP_AUTOCENTER");
 
             return DI_OK;
         }
@@ -790,34 +926,30 @@ public:
         if (!header)
             return E_POINTER;
 
-        if (IsEqualGUID(property, DIPROP_FFGAIN))
+        if (is_diprop(property, 7)) // DIPROP_FFGAIN
         {
             const auto* value =
-                reinterpret_cast<const DIPROPDWORD*>(
-                    header
-                );
+                reinterpret_cast<const DIPROPDWORD*>(header);
 
             ff_gain_ = value->dwData;
 
             log_message(
-                "DIPROP_FFGAIN = %lu",
+                "SetProperty: DIPROP_FFGAIN = %lu",
                 ff_gain_
             );
 
             return DI_OK;
         }
 
-        if (IsEqualGUID(property, DIPROP_AUTOCENTER))
+        if (is_diprop(property, 9)) // DIPROP_AUTOCENTER
         {
             const auto* value =
-                reinterpret_cast<const DIPROPDWORD*>(
-                    header
-                );
+                reinterpret_cast<const DIPROPDWORD*>(header);
 
             autocenter_ = value->dwData;
 
             log_message(
-                "DIPROP_AUTOCENTER = %lu",
+                "SetProperty: DIPROP_AUTOCENTER = %lu",
                 autocenter_
             );
 
@@ -880,14 +1012,6 @@ public:
     }
 
 
-    HRESULT STDMETHODCALLTYPE SetDataFormat(
-        LPCDIDATAFORMAT format
-    ) override
-    {
-        return real_->SetDataFormat(format);
-    }
-
-
     HRESULT STDMETHODCALLTYPE SetEventNotification(
         HANDLE event
     ) override
@@ -917,15 +1041,39 @@ public:
         DeviceInstance* info
     ) override
     {
+        if (!info)
+            return E_POINTER;
+
+        const DWORD caller_size = info->dwSize;
+
+        log_message(
+            "GetDeviceInfo: caller dwSize=%lu",
+            caller_size
+        );
+
         HRESULT hr =
             real_->GetDeviceInfo(info);
 
-        if (SUCCEEDED(hr) && info)
-            info->guidFFDriver = GUID_G25StandaloneFF;
+        if (
+            SUCCEEDED(hr) &&
+            caller_size >= sizeof(DeviceInstance)
+        )
+        {
+            info->guidFFDriver =
+                GUID_G25StandaloneFF;
+        }
 
         return hr;
     }
 
+    HRESULT STDMETHODCALLTYPE SetDataFormat(
+        LPCDIDATAFORMAT format
+    ) override
+    {
+        log_message("SetDataFormat");
+
+        return real_->SetDataFormat(format);
+    }
 
     HRESULT STDMETHODCALLTYPE RunControlPanel(
         HWND owner,
