@@ -2,89 +2,78 @@
 
 ## Goal
 
-Plug a Logitech G25 into Windows 11 and use it as a racing controller without Logitech Gaming Software or Logitech Profiler.
+Use a Logitech G25 as a complete racing controller on Windows 11 without Logitech Gaming Software or Logitech Profiler.
 
-The preferred architecture is to reuse Windows' built-in HID support wherever possible and keep Logitech-specific behavior in a small open-source userspace service.
+The architecture keeps ordinary controller input on Windows' built-in HID/DirectInput path. Logitech-specific initialization, steering range, and force output live in a small userspace service, while an application-local DirectInput proxy exposes missing FFB capability to games.
 
-## Phase 0 — Hardware proof
+## Current baseline
 
-### 0.1 Enumerate and read
-- Detect Logitech VID `046D`.
-- Detect G25 PID `C294` and/or `C299`.
-- List every exposed HID interface.
-- Read raw input reports.
-- Record which bytes change for:
-  - steering
-  - throttle
-  - brake
-  - clutch
-  - buttons
-  - H-pattern shifter
-  - sequential shifter
-  - D-pad
+The proof of concept is working end to end:
 
-**Done when:** we can run our own program on Windows 11, with Logitech Gaming Software absent, and see reliable raw G25 input.
+- the service detects both G25 product modes and switches to native mode;
+- Windows supplies steering, pedals, shifter, and buttons directly to games;
+- the service configures steering range and disables the default centering spring;
+- a 32-bit `dinput8.dll` proxy advertises constant-force support;
+- the proxy forwards game force samples to the service over localhost UDP;
+- the service translates those samples into Logitech HID force reports;
+- a watchdog neutralizes force when samples stop;
+- force feedback works in Richard Burns Rally and Colin McRae Rally 2.0.
 
-### 0.2 Decode input
-- Convert raw reports into named controller state.
-- Determine ranges and neutral values.
-- Add a live diagnostic display.
+## Phase 0 — Hardware proof: complete
 
-**Done when:** the console reports meaningful values such as steering position, three pedals, selected gear, and buttons.
+- [x] Detect Logitech VID `046D` and G25 PIDs `C294`/`C299`.
+- [x] Enumerate and read the wheel through the standard HID stack.
+- [x] Decode steering, pedals, shifter, D-pad, and buttons.
+- [x] Switch compatibility mode to native G25 mode.
+- [x] Configure and test steering range up to 900 degrees.
 
-### 0.3 Device control
-- Document the Logitech mode-switch command.
-- Enter native G25 mode if required.
-- Implement steering-range control.
-- Test 900-degree mode.
+## Phase 1 — Windows controller path: complete
 
-**Done when:** G25Standalone can initialize the wheel and configure steering range without Logitech software.
+- [x] Verify that Windows exposes normal G25 inputs adequately to games.
+- [x] Keep the physical HID input path rather than introducing a virtual controller.
+- [x] Limit the custom layer to wheel configuration and force feedback.
 
-## Phase 1 — Windows controller path
+## Phase 2 — Force feedback: in progress
 
-First test whether Windows already exposes the physical G25 inputs adequately to games.
+- [x] Prove constant-force output directly against the G25 protocol.
+- [x] Advertise a synthetic FFB driver and steering actuator through DirectInput.
+- [x] Implement DirectInput constant-force creation, update, start, stop, and unload.
+- [x] Bridge force samples from the proxy to the service over localhost UDP.
+- [x] Disable the default centering spring while game FFB is active.
+- [x] Add a loss-of-signal watchdog and shutdown neutralization.
+- [x] Validate the path in at least two 32-bit games.
+- [ ] Apply DirectInput device/effect gain consistently to outgoing force.
+- [ ] Confirm direction handling and sign across more games.
+- [ ] Implement spring, damper, friction, and periodic effects as real games require them.
+- [ ] Define clean behavior for multiple simultaneous effects.
+- [ ] Add a separate x64 proxy build for 64-bit games.
 
-If yes:
-- keep the physical HID input path;
-- add only the missing configuration/FFB bridge.
+**Done when:** the supported effect set behaves predictably across a representative group of 32-bit and 64-bit games, with safe lifecycle handling.
 
-If no:
-- add a virtual controller layer;
-- prototype with a maintained open-source virtual HID/DirectInput solution;
-- replace it later only if necessary.
+## Phase 3 — Reliability and usability
 
-**Done when:** a game can bind steering, throttle, brake, clutch, shifter, and buttons with Logitech software absent.
+- [ ] Turn the Python service into a background Windows application/service.
+- [ ] Add automatic startup and reliable device connect/disconnect handling.
+- [ ] Persist steering range and other configuration.
+- [ ] Replace development logging with configurable, bounded diagnostics.
+- [ ] Add automated tests for force conversion, watchdog behavior, and protocol reports.
+- [ ] Add reproducible x86/x64 CI builds.
+- [ ] Package the service and both proxy architectures in an installer.
+- [ ] Establish a Windows signing and release strategy.
+- [ ] Add a small control panel only after the runtime is stable.
 
-## Phase 2 — Force feedback
+## Immediate next steps
 
-Implement one effect at a time:
-
-1. constant force;
-2. spring;
-3. damper;
-4. friction;
-5. periodic effects;
-6. effect lifecycle and gain.
-
-Translate Windows/DirectInput force-feedback requests into the Logitech G25 protocol.
-
-**Done when:** force feedback works correctly in at least one target simulator.
-
-## Phase 3 — Productize
-
-- background Windows service;
-- optional control panel;
-- configuration persistence;
-- device connect/disconnect handling;
-- installer;
-- modern Windows signing strategy;
-- CI builds;
-- documentation.
+1. Verify gain and direction behavior with targeted tests.
+2. Capture unsupported effect requests from additional games.
+3. Implement the next effect type based on real compatibility needs.
+4. Produce an x64 proxy alongside the guarded x86 build.
+5. Design the smallest reliable startup/install flow.
 
 ## Non-goals for early versions
 
-- Logitech G Hub compatibility;
-- Logitech Profiler profiles;
-- GUI before the protocol works;
-- supporting every Logitech wheel immediately;
-- writing a kernel driver before we prove it is necessary.
+- Logitech G Hub compatibility.
+- Logitech Profiler profile emulation.
+- Supporting every Logitech wheel immediately.
+- A custom kernel driver before the userspace approach proves insufficient.
+- A polished GUI before runtime reliability and compatibility are established.

@@ -1,6 +1,13 @@
 @echo off
 setlocal
 
+if /I not "%VSCMD_ARG_TGT_ARCH%"=="x86" (
+    echo ERROR: This proxy must be built with the x86 MSVC toolchain.
+    echo Open an "x86 Native Tools Command Prompt for VS" and run build.bat again.
+    echo Current target architecture: %VSCMD_ARG_TGT_ARCH%
+    exit /b 1
+)
+
 if not exist build mkdir build
 
 echo Building G25Standalone DirectInput proxy...

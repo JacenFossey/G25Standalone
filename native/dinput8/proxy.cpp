@@ -405,14 +405,23 @@ public:
             direction = effect->rglDirection[0];
         }
 
-        log_message(
-            "Effect SetParameters: magnitude=%ld gain=%lu axes=%lu direction=%ld flags=0x%08lX",
-            magnitude_,
-            gain_,
-            effect->cAxes,
-            direction,
-            flags
-        );
+        // Games may update force parameters every frame. Keep the diagnostic
+        // useful without opening and appending to the log file at frame rate.
+        ULONGLONG now = GetTickCount64();
+
+        if (now - last_parameter_log_ms_ >= 1000)
+        {
+            log_message(
+                "Effect SetParameters: magnitude=%ld gain=%lu axes=%lu direction=%ld flags=0x%08lX",
+                magnitude_,
+                gain_,
+                effect->cAxes,
+                direction,
+                flags
+            );
+
+            last_parameter_log_ms_ = now;
+        }
 
         if (flags & DIEP_START)
         {
@@ -513,6 +522,7 @@ private:
     DWORD gain_ = DI_FFNOMINALMAX;
 
     bool playing_ = false;
+    ULONGLONG last_parameter_log_ms_ = 0;
 };
 
 
