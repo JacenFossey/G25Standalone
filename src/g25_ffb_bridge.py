@@ -63,7 +63,16 @@ def make_force_report(magnitude: int) -> bytes:
         0x00,
     ])
 
-
+DEFAULT_SPRING_OFF_REPORT = bytes([
+    0x00,
+    0xF5,
+    0x00,
+    0x00,
+    0x00,
+    0x00,
+    0x00,
+    0x00,
+])
 STOP_REPORT = bytes([
     0x00,
     0xF3,
@@ -106,8 +115,17 @@ def main() -> int:
     last_packet = time.monotonic()
 
     try:
-        # Known neutral starting state.
+        # Clear anything left over from a previous session.
+        wheel.write(STOP_REPORT)
+
+        # Disable the G25's built-in/default centering spring.
+        # The game should provide steering forces itself.
+        wheel.write(DEFAULT_SPRING_OFF_REPORT)
+
+        # Known neutral constant-force state.
         wheel.write(make_force_report(0))
+
+        print("Default centering spring disabled.")
 
         while True:
             ready, _, _ = select.select(
