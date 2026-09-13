@@ -83,8 +83,11 @@ Normal controller input continues to flow directly from the G25 through Windows.
 ## Safety and limitations
 
 - Only DirectInput constant-force effects are implemented.
+- The proxy now combines simultaneous constant-force effects, applies effect and device gain, and honours explicit Cartesian direction reversals. A short UDP heartbeat keeps sustained force alive while the game is running.
 - The proxy is an application-local compatibility layer, not a kernel driver.
 - The service includes a short FFB watchdog and sends neutral/stop commands during shutdown.
 - Do not send arbitrary HID output reports to the wheel.
+
+After changing the proxy source, rebuild it in the x86 Native Tools prompt and copy the new DLL beside each game executable. Run `native\dinput8\test.bat` from its directory to check the force arithmetic before launching a game. Start with a low in-game FFB setting when testing a new DLL.
 
 See [PLAN.md](PLAN.md) for completed milestones and next steps.
