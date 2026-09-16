@@ -45,7 +45,10 @@ REENUMERATION_TIMEOUT_SECONDS = 8.0
 RETRY_INTERVAL_SECONDS = 3.0
 
 G25_FORCE_NEUTRAL_BYTE = 0x80
-G25_FORCE_HYSTERESIS_STEPS = 3
+# Smooth the high-resolution force before converting it to the G25's 8-bit
+# hardware command. This avoids turning small game-side changes into coarse,
+# gear-like steps while adding only a few milliseconds of settling time.
+G25_FORCE_SMOOTHING_ALPHA = 0.35
 
 ENTER_NATIVE_MODE_REPORT = bytes([0x00, 0xF8, 0x10, 0, 0, 0, 0, 0])
 STOP_ALL_REPORT = bytes([0x00, 0xF3, 0, 0, 0, 0, 0, 0])
@@ -168,6 +171,7 @@ class G25Output:
         self.device = None
         self.path = None
         self.current_force_byte = G25_FORCE_NEUTRAL_BYTE
+        self.filtered_force = 0.0
 
     @property
     def connected(self) -> bool:
@@ -194,6 +198,7 @@ class G25Output:
             self._write(DEFAULT_SPRING_OFF_REPORT)
             self._write(make_force_report_byte(G25_FORCE_NEUTRAL_BYTE))
             self.current_force_byte = G25_FORCE_NEUTRAL_BYTE
+            self.filtered_force = 0.0
             print("[G25] Force-feedback output ready.")
         except Exception:
             try:
@@ -204,33 +209,30 @@ class G25Output:
             self.path = None
             raise
 
-    def set_force(self, magnitude: int) -> None:
-        """Send only physically meaningful G25 force changes.
+    def set_force(self, magnitude: int, *, immediate: bool = False) -> None:
+        """Apply a short low-pass filter before G25 force quantization.
 
-        DirectInput uses a -10000..10000 force range, but the G25 command has
-        only about 255 hardware levels. Comparing the high-resolution value made
-        us resend identical physical commands and allowed one-step dithering
-        under steady load. The geared G25 can make that chatter feel like a
-        click through the rim.
+        The registered driver can update/render more frequently than the old
+        application-local proxy. Directly quantizing every small change to the
+        G25's 8-bit constant-force command can feel like the gear train is
+        stepping under sustained load. Filtering in the original DirectInput
+        range keeps those transitions continuous before they hit the coarse
+        hardware command.
 
-        Compare in the wheel's byte domain instead. Suppress tiny changes while
-        already under load, but always allow entering or returning to neutral
-        immediately. A gradual real force change still accumulates and is sent
-        once it differs by three hardware steps.
+        Safety/lifecycle neutralization bypasses the filter so a stopped game or
+        disabled actuator returns to zero immediately.
         """
-        target_force_byte = force_to_wheel_byte(magnitude)
+        magnitude = clamp(magnitude, -10000, 10000)
 
+        if immediate:
+            self.filtered_force = float(magnitude)
+        else:
+            self.filtered_force += (
+                magnitude - self.filtered_force
+            ) * G25_FORCE_SMOOTHING_ALPHA
+
+        target_force_byte = force_to_wheel_byte(round(self.filtered_force))
         if target_force_byte == self.current_force_byte:
-            return
-
-        crosses_neutral = (
-            target_force_byte == G25_FORCE_NEUTRAL_BYTE
-            or self.current_force_byte == G25_FORCE_NEUTRAL_BYTE
-        )
-        if (
-            not crosses_neutral
-            and abs(target_force_byte - self.current_force_byte) < G25_FORCE_HYSTERESIS_STEPS
-        ):
             return
 
         self._write(make_force_report_byte(target_force_byte))
@@ -264,6 +266,7 @@ class G25Output:
         self.device = None
         self.path = None
         self.current_force_byte = G25_FORCE_NEUTRAL_BYTE
+        self.filtered_force = 0.0
 
 
 def create_legacy_ffb_socket() -> socket.socket:
@@ -348,14 +351,17 @@ def main() -> int:
 
                     # A registered driver connection has priority. This makes it
                     # safe to leave an old local proxy file around while testing.
+                    force_active = False
                     if engine.sessions:
                         desired_force = engine.render(kinematics, now)
+                        force_active = engine.has_active_effects()
                     elif now - legacy_force_at <= LEGACY_WATCHDOG_SECONDS:
                         desired_force = legacy_force
+                        force_active = True
                     else:
                         desired_force = 0
 
-                    output.set_force(desired_force)
+                    output.set_force(desired_force, immediate=not force_active)
                 except OSError as exc:
                     print(f"[G25] Runtime HID failure: {exc}", file=sys.stderr)
                     output.close(send_stop=False)
