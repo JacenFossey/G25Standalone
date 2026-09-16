@@ -45,7 +45,7 @@ REENUMERATION_TIMEOUT_SECONDS = 8.0
 RETRY_INTERVAL_SECONDS = 3.0
 
 G25_FORCE_NEUTRAL_BYTE = 0x80
-G25_FORCE_HYSTERESIS_STEPS = 2
+G25_FORCE_HYSTERESIS_STEPS = 3
 
 ENTER_NATIVE_MODE_REPORT = bytes([0x00, 0xF8, 0x10, 0, 0, 0, 0, 0])
 STOP_ALL_REPORT = bytes([0x00, 0xF3, 0, 0, 0, 0, 0, 0])
@@ -213,10 +213,10 @@ class G25Output:
         under steady load. The geared G25 can make that chatter feel like a
         click through the rim.
 
-        Compare in the wheel's byte domain instead. Suppress a one-step change
-        while already under load, but always allow entering or returning to
-        neutral immediately. A gradual real force change still accumulates and
-        is sent once it differs by two hardware steps.
+        Compare in the wheel's byte domain instead. Suppress tiny changes while
+        already under load, but always allow entering or returning to neutral
+        immediately. A gradual real force change still accumulates and is sent
+        once it differs by three hardware steps.
         """
         target_force_byte = force_to_wheel_byte(magnitude)
 
