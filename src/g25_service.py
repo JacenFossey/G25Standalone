@@ -44,6 +44,9 @@ DEVICE_POLL_INTERVAL_SECONDS = 0.50
 REENUMERATION_TIMEOUT_SECONDS = 8.0
 RETRY_INTERVAL_SECONDS = 3.0
 
+G25_FORCE_NEUTRAL_BYTE = 0x80
+G25_FORCE_HYSTERESIS_STEPS = 2
+
 ENTER_NATIVE_MODE_REPORT = bytes([0x00, 0xF8, 0x10, 0, 0, 0, 0, 0])
 STOP_ALL_REPORT = bytes([0x00, 0xF3, 0, 0, 0, 0, 0, 0])
 DEFAULT_SPRING_OFF_REPORT = bytes([0x00, 0xF5, 0, 0, 0, 0, 0, 0])
@@ -114,12 +117,16 @@ def make_range_report(degrees: int) -> bytes:
 
 def force_to_wheel_byte(magnitude: int) -> int:
     magnitude = clamp(magnitude, -10000, 10000)
-    return clamp(round(0x80 + (magnitude / 10000.0) * 0x7F), 0x01, 0xFF)
+    return clamp(round(G25_FORCE_NEUTRAL_BYTE + (magnitude / 10000.0) * 0x7F), 0x01, 0xFF)
+
+
+def make_force_report_byte(force_byte: int) -> bytes:
+    # Logitech lg4ff constant-force slot 0.
+    return bytes([0x00, 0x11, 0x08, clamp(force_byte, 0x01, 0xFF), 0x80, 0, 0, 0])
 
 
 def make_force_report(magnitude: int) -> bytes:
-    # Logitech lg4ff constant-force slot 0.
-    return bytes([0x00, 0x11, 0x08, force_to_wheel_byte(magnitude), 0x80, 0, 0, 0])
+    return make_force_report_byte(force_to_wheel_byte(magnitude))
 
 
 def send_report_once(device_info: dict, report: bytes) -> int:
@@ -160,7 +167,7 @@ class G25Output:
     def __init__(self) -> None:
         self.device = None
         self.path = None
-        self.current_force = 0
+        self.current_force_byte = G25_FORCE_NEUTRAL_BYTE
 
     @property
     def connected(self) -> bool:
@@ -185,8 +192,8 @@ class G25Output:
             print(f"[G25] Steering range set to {range_degrees}°.")
             self._write(STOP_ALL_REPORT)
             self._write(DEFAULT_SPRING_OFF_REPORT)
-            self._write(make_force_report(0))
-            self.current_force = 0
+            self._write(make_force_report_byte(G25_FORCE_NEUTRAL_BYTE))
+            self.current_force_byte = G25_FORCE_NEUTRAL_BYTE
             print("[G25] Force-feedback output ready.")
         except Exception:
             try:
@@ -198,10 +205,36 @@ class G25Output:
             raise
 
     def set_force(self, magnitude: int) -> None:
-        magnitude = clamp(magnitude, -10000, 10000)
-        if magnitude != self.current_force:
-            self._write(make_force_report(magnitude))
-            self.current_force = magnitude
+        """Send only physically meaningful G25 force changes.
+
+        DirectInput uses a -10000..10000 force range, but the G25 command has
+        only about 255 hardware levels. Comparing the high-resolution value made
+        us resend identical physical commands and allowed one-step dithering
+        under steady load. The geared G25 can make that chatter feel like a
+        click through the rim.
+
+        Compare in the wheel's byte domain instead. Suppress a one-step change
+        while already under load, but always allow entering or returning to
+        neutral immediately. A gradual real force change still accumulates and
+        is sent once it differs by two hardware steps.
+        """
+        target_force_byte = force_to_wheel_byte(magnitude)
+
+        if target_force_byte == self.current_force_byte:
+            return
+
+        crosses_neutral = (
+            target_force_byte == G25_FORCE_NEUTRAL_BYTE
+            or self.current_force_byte == G25_FORCE_NEUTRAL_BYTE
+        )
+        if (
+            not crosses_neutral
+            and abs(target_force_byte - self.current_force_byte) < G25_FORCE_HYSTERESIS_STEPS
+        ):
+            return
+
+        self._write(make_force_report_byte(target_force_byte))
+        self.current_force_byte = target_force_byte
 
     def read_steering(self) -> int | None:
         if self.device is None:
@@ -220,7 +253,7 @@ class G25Output:
             return
         if send_stop:
             try:
-                self._write(make_force_report(0))
+                self._write(make_force_report_byte(G25_FORCE_NEUTRAL_BYTE))
                 self._write(STOP_ALL_REPORT)
             except Exception:
                 pass
@@ -230,7 +263,7 @@ class G25Output:
             pass
         self.device = None
         self.path = None
-        self.current_force = 0
+        self.current_force_byte = G25_FORCE_NEUTRAL_BYTE
 
 
 def create_legacy_ffb_socket() -> socket.socket:
