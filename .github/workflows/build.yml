@@ -1,0 +1,35 @@
+name: build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  python-tests:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: python -m unittest discover -s tests -v
+
+  g25ff:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        include:
+          - name: x86
+            generator_arch: Win32
+          - name: x64
+            generator_arch: x64
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure ${{ matrix.name }}
+        run: cmake -S native/g25ff -B build/g25ff-${{ matrix.name }} -A ${{ matrix.generator_arch }}
+      - name: Build ${{ matrix.name }}
+        run: cmake --build build/g25ff-${{ matrix.name }} --config Release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: g25ff-${{ matrix.name }}
+          path: build/g25ff-${{ matrix.name }}/Release/g25ff.dll
