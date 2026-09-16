@@ -7,7 +7,16 @@ endif()
 
 add_library(g25ff SHARED driver.cpp g25ff.def)
 target_compile_features(g25ff PRIVATE cxx_std_20)
-target_compile_definitions(g25ff PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_definitions(
+    g25ff
+    PRIVATE
+        WIN32_LEAN_AND_MEAN
+        NOMINMAX
+        # The legacy DirectInput COM interfaces do not declare virtual
+        # destructors. Methods still remain virtual through the interface; this
+        # only removes the C++ contextual specifier from our declarations.
+        override=
+)
 target_compile_options(g25ff PRIVATE /W4 /permissive- /EHsc)
 target_link_libraries(g25ff PRIVATE ws2_32)
 set_target_properties(g25ff PROPERTIES OUTPUT_NAME "g25ff")
