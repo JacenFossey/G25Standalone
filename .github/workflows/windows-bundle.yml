@@ -1,0 +1,39 @@
+name: Windows bundle
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bundle:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read pinned Python version
+        shell: pwsh
+        run: '"PYTHON_VERSION=$((Get-Content packaging/python-version.txt -Raw).Trim())" >> $env:GITHUB_ENV'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          architecture: x64
+      - name: Build standalone runtime and both drivers
+        shell: pwsh
+        run: ./scripts/Build-WindowsBundle.ps1
+      - name: Test extracted ZIP with no Python on PATH
+        shell: pwsh
+        run: |
+          $archive = (Get-ChildItem dist/*.zip).FullName
+          python packaging/smoke_bundle.py $archive
+          if ($LASTEXITCODE -ne 0) { throw 'Packaged executable smoke test failed' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: G25Standalone-windows-x64
+          path: |
+            dist/*.zip
+            dist/*.zip.sha256
+          if-no-files-found: error
+          retention-days: 30

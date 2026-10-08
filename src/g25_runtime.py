@@ -375,6 +375,10 @@ def launch_background(root: Path, steering_range: int | None = None) -> dict:
     if steering_range is not None:
         command.extend(["--range", str(steering_range)])
     options = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {"start_new_session": True}
+    if getattr(sys, "frozen", False):
+        # This is an independent application, not a PyInstaller worker. It must
+        # remain alive after the short-lived `start` command has exited.
+        options["env"] = {**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"}
     child = subprocess.Popen(
         command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL, close_fds=True, **options

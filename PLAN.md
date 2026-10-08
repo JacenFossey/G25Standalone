@@ -98,7 +98,8 @@ Effect semantics:
 
 ## Phase 4 — Reliability and packaging
 
-- [ ] Turn the Python service into a packaged background Windows process/service.
+- [x] Package the runtime into a standalone Windows x64 executable bundle with both driver architectures and CI smoke checks.
+- [ ] Accept the bundle on clean Windows 11 without Python, build tools or VC redistributables.
 - [ ] Start automatically at sign-in/boot with clean shutdown behavior.
 - [x] Persist steering range with validated, atomic per-user settings; session overrides do not overwrite it.
 - [x] Add rotating runtime/HID lifecycle logs and foreground/background logging modes.
@@ -119,8 +120,8 @@ Package the service and HID runtime into an executable, start it at Windows sign
 
 Implementation sequence:
 
-1. Background runtime management: persistent range, rotating logs, single instance, process commands, and cooperative shutdown. Keep force rendering/conversion/smoothing unchanged. This step is implemented on `feat/background-runtime`; acceptance testing on physical hardware remains.
-2. Packaged executable: bundle Python/HID dependencies and verify on Windows without development tools.
+1. Background runtime management: persistent range, rotating logs, single instance, process commands, and cooperative shutdown. Merged; acceptance testing on physical hardware remains.
+2. Packaged executable: bundle Python/HID dependencies and both drivers, pin/hash-check build packages, and exercise the extracted ZIP in CI. Implemented; clean Windows 11 and physical-wheel acceptance remain.
 3. Per-user installer: driver registration, optional sign-in startup, clean upgrades/uninstall, and registry backup/rollback hardening.
 4. Release pipeline and installed-game acceptance in LFS, iRacing, and RBR.
 
