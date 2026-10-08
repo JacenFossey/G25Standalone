@@ -6,12 +6,12 @@ hidapi import and enumeration. Run on a Windows CI host with no attached G25.
 from __future__ import annotations
 
 import argparse
-import ctypes
 import hashlib
 import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import time
 import zipfile
@@ -30,8 +30,12 @@ def main():
         manifest = json.loads((folder / 'BUILD-INFO.json').read_text(encoding='utf-8'))
         for relative, expected in manifest['files'].items():
             assert hashlib.sha256((folder / relative).read_bytes()).hexdigest() == expected, relative
-        # Load the shipping x64 COM DLL, with no side-by-side redist DLLs.
-        ctypes.WinDLL(str(folder / 'drivers/x64/g25ff.dll'))
+        # A separate probe process releases the DLL before temporary-directory
+        # cleanup. ctypes library objects do not automatically call FreeLibrary.
+        subprocess.run([
+            sys.executable, '-I', '-c', 'import ctypes, sys; ctypes.WinDLL(sys.argv[1])',
+            str(folder / 'drivers/x64/g25ff.dll'),
+        ], check=True, timeout=10)
         executable = folder / 'G25Standalone.exe'
         state = root / 'user state with spaces'
         cwd = root / 'unrelated working directory'
