@@ -5,3 +5,5 @@ __pycache__/
 .vscode/
 .idea/
 native/dinput8/build/
+build/
+dist/

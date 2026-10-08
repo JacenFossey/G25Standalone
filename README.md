@@ -46,10 +46,18 @@ Constant/ramp/periodic/custom effects are synthesized in the service. Spring, da
 ## Requirements
 
 - Windows 11, 64-bit
-- Python 3
-- Microsoft Visual Studio Build Tools 2022 with the C++ workload and Windows SDK
-- CMake 3.24+
 - Logitech G25
+
+The Windows bundle includes Python/HID dependencies and both registered-driver
+architectures. Download `G25Standalone-windows-x64` from a successful
+[Windows bundle Actions run](../../actions/workflows/windows-bundle.yml), extract
+the artifact and then the versioned ZIP inside it, and follow its `QUICKSTART.md`.
+Keep the entire extracted folder in a stable location before registering its
+drivers. CI exercises the executable; fresh Windows 11 and physical-wheel
+acceptance remain outstanding. This is a portable preview, not an installer.
+
+For development from source, install Python 3, Visual Studio Build Tools 2022
+with the C++ workload and Windows SDK, and CMake 3.24+.
 
 Do not install a WinUSB/libusb filter driver or use Zadig. G25Standalone relies on the standard Windows HID stack.
 
@@ -98,7 +106,45 @@ Only one managed process can use a data directory. Exit codes are `0` for succes
 
 Windows sign-out/shutdown notifications request the same cooperative cleanup as `stop`. Forced process termination, power loss, and device failure cannot guarantee a final HID write; use the management command for routine stopping. The automated shutdown tests use mocked HID output, so physical-wheel sign-out behavior remains an acceptance check.
 
-This step adds process management. Python is still required, automatic sign-in startup is not installed yet, and the executable/installer are the next two development steps. `--data-dir PATH` is available for isolated development/tests; normal use should keep the default so all commands address the same instance.
+The bundled executable accepts the same commands: replace
+`py .\src\g25_service.py` with `.\G25Standalone.exe`. It includes its own runtime;
+Python is required only for source development. Automatic sign-in startup is
+not installed yet; the per-user installer is the next development step.
+`--data-dir PATH` is available for isolated development/tests; normal use should
+keep the default so all commands address the same instance.
+
+## Build the Windows bundle
+
+Install the x64 CPython version in `packaging/python-version.txt`, Visual Studio
+Build Tools 2022 (C++/Windows SDK), and CMake 3.24+, then run from PowerShell:
+
+```powershell
+.\scripts\Build-WindowsBundle.ps1 -Python python
+```
+
+The script creates a fresh build environment, installs the complete wheel-only
+dependency lock with SHA-256 verification, builds both driver architectures,
+and uses the checked-in PyInstaller specification. The drivers statically link
+the MSVC runtime; required runtime DLLs for Python/HID are bundled. Native
+imports and architecture are checked before ZIP assembly. Do not copy just the
+executable out of the bundle: it needs the adjacent `_internal` folder.
+
+`dist` receives a versioned ZIP and its checksum. `BUILD-INFO.json` inside the
+ZIP records the source revision, package versions, native imports and file
+hashes. On a Windows build host without an attached G25, test the shipping ZIP:
+
+```powershell
+python .\packaging\smoke_bundle.py (Get-ChildItem .\dist\*.zip).FullName
+```
+
+The test extracts to a path containing spaces, changes working directory and
+removes Python/tool paths from the executable's environment. It exercises real
+HID loading, settings, independent background startup, status, duplicate
+protection and cooperative stop. It does not register drivers or change the
+normal user's settings. CI uses a Windows Server build host; a clean Windows 11
+machine without development tools/VC redistributables and gameplay in LFS,
+iRacing and RBR remain the release acceptance checks. This preview does not
+include the separately built legacy proxy or add installer/startup behavior.
 
 ## Build the install-once DirectInput driver
 
@@ -186,7 +232,8 @@ Run the effect-engine tests with:
 python -m unittest discover -s tests -v
 ```
 
-GitHub Actions builds the registered DLL for both Win32 and x64 and runs the Python effect tests.
+GitHub Actions builds the registered DLL for both Win32 and x64, runs the Python
+tests, and builds/tests the downloadable Windows ZIP.
 
 The Python suite also checks signed force smoothing, small sustained forces, and immediate neutralization using mocked HID output. The separate Native proxy workflow builds and tests the x86 fallback; locally, run `native\dinput8\test.bat` from that directory in an x86 Native Tools prompt.
 

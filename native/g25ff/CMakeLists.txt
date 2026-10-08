@@ -17,4 +17,7 @@ target_compile_options(
         /FI"${CMAKE_CURRENT_SOURCE_DIR}/msvc_legacy_com.h"
 )
 target_link_libraries(g25ff PRIVATE ws2_32)
-set_target_properties(g25ff PROPERTIES OUTPUT_NAME "g25ff")
+set_target_properties(g25ff PROPERTIES
+    OUTPUT_NAME "g25ff"
+    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
+)
