@@ -42,10 +42,12 @@ The proof of concept is working end to end:
 - [x] Disable the default centering spring while game FFB is active.
 - [x] Add a loss-of-signal watchdog and shutdown neutralization.
 - [x] Validate the path in at least two 32-bit games.
-- [ ] Apply DirectInput device/effect gain consistently to outgoing force.
-- [ ] Confirm direction handling and sign across more games.
+- [x] Mix simultaneous constant-force effects and keep sustained effects alive with a heartbeat.
+- [x] Implement DirectInput device/effect gain and Cartesian direction handling in the proxy, with arithmetic tests.
+- [ ] Rebuild and validate gain/direction on the physical G25 in both target games.
+- [ ] Confirm direction handling and sign across more games, including non-Cartesian requests.
 - [ ] Implement spring, damper, friction, and periodic effects as real games require them.
-- [ ] Define clean behavior for multiple simultaneous effects.
+- [ ] Complete effect lifecycle semantics (reset, durations, envelopes, trigger buttons, and concurrent effect types).
 - [ ] Add a separate x64 proxy build for 64-bit games.
 
 **Done when:** the supported effect set behaves predictably across a representative group of 32-bit and 64-bit games, with safe lifecycle handling.
@@ -64,9 +66,9 @@ The proof of concept is working end to end:
 
 ## Immediate next steps
 
-1. Verify gain and direction behavior with targeted tests.
-2. Capture unsupported effect requests from additional games.
-3. Implement the next effect type based on real compatibility needs.
+1. Run the Windows x86 build and force-state tests, then retest at low FFB in RBR and Colin McRae Rally 2.0.
+2. Verify gain, Cartesian direction, STOPALL, pause, and a sustained force on the physical wheel.
+3. Capture unsupported effect requests from additional games and implement the next type based on evidence.
 4. Produce an x64 proxy alongside the guarded x86 build.
 5. Design the smallest reliable startup/install flow.
 
