@@ -7,12 +7,19 @@
 #include <windows.h>
 #include <dinput.h>
 
+#include "force_state.h"
+
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdarg>
+#include <condition_variable>
 #include <cstdio>
 #include <cwctype>
+#include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <type_traits>
 
 #pragma comment(lib, "ws2_32.lib")
@@ -252,23 +259,181 @@ static bool contains_g25(const wchar_t* text)
 
 
 // -----------------------------------------------------------------------------
+// Shared force output. Individual effects update the mix, not the wheel.
+// Periodic retransmission keeps a legitimate static effect alive without
+// weakening the service's 150 ms loss-of-signal watchdog.
+// -----------------------------------------------------------------------------
+
+class ForceOutput final
+{
+public:
+    ForceOutput()
+        : worker_([this] { run(); })
+    {
+    }
+
+    ~ForceOutput()
+    {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stopping_ = true;
+        }
+
+        changed_.notify_one();
+        worker_.join();
+        send_ffb_force(0);
+    }
+
+    uint64_t add()
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto id = state_.add();
+        changed_.notify_one();
+        return id;
+    }
+
+    void remove(uint64_t id)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        state_.remove(id);
+        changed_.notify_one();
+    }
+
+    void set_parameters(uint64_t id, LONG magnitude, DWORD gain, int direction)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        state_.set_parameters(id, magnitude, gain, direction);
+        changed_.notify_one();
+    }
+
+    void set_playing(uint64_t id, bool playing)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        state_.set_playing(id, playing);
+        changed_.notify_one();
+    }
+
+    bool is_playing(uint64_t id)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return state_.is_playing(id);
+    }
+
+    DWORD feedback_state()
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        DWORD status = DIGFFS_POWERON;
+
+        status |= state_.actuators_enabled()
+            ? DIGFFS_ACTUATORSON : DIGFFS_ACTUATORSOFF;
+
+        if (state_.paused())
+            status |= DIGFFS_PAUSED;
+
+        if (!state_.any_playing())
+            status |= DIGFFS_STOPPED;
+
+        return status;
+    }
+
+    DWORD device_gain()
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return state_.device_gain();
+    }
+
+    void set_device_gain(DWORD gain)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        state_.set_device_gain(gain);
+        changed_.notify_one();
+    }
+
+    void command(DWORD flags)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        switch (flags)
+        {
+        case DISFFC_STOPALL:
+        case DISFFC_RESET:
+            state_.stop_all();
+            break;
+        case DISFFC_PAUSE:
+            state_.pause();
+            break;
+        case DISFFC_CONTINUE:
+            state_.resume();
+            break;
+        case DISFFC_SETACTUATORSON:
+            state_.set_actuators(true);
+            break;
+        case DISFFC_SETACTUATORSOFF:
+            state_.set_actuators(false);
+            break;
+        default:
+            break;
+        }
+
+        changed_.notify_one();
+    }
+
+private:
+    void run()
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+
+        while (!stopping_)
+        {
+            const LONG force = state_.force();
+            lock.unlock();
+            send_ffb_force(force);
+            lock.lock();
+            changed_.wait_for(lock, std::chrono::milliseconds(25));
+        }
+    }
+
+    ForceState state_;
+    std::mutex mutex_;
+    std::condition_variable changed_;
+    bool stopping_ = false;
+    std::thread worker_;
+};
+
+static std::mutex g_output_mutex;
+static std::weak_ptr<ForceOutput> g_output;
+
+static std::shared_ptr<ForceOutput> shared_output()
+{
+    std::lock_guard<std::mutex> lock(g_output_mutex);
+    auto output = g_output.lock();
+
+    if (!output)
+    {
+        output = std::make_shared<ForceOutput>();
+        g_output = output;
+    }
+
+    return output;
+}
+
+
+// -----------------------------------------------------------------------------
 // Fake Constant Force effect
-//
-// For this milestone it only records what the game asks for.
-// It does NOT yet send torque to the wheel.
 // -----------------------------------------------------------------------------
 
 class FakeConstantForceEffect final : public IDirectInputEffect
 {
 public:
-    FakeConstantForceEffect()
+    explicit FakeConstantForceEffect(std::shared_ptr<ForceOutput> output)
+        : output_(std::move(output)), id_(output_->add())
     {
         log_message("FakeConstantForceEffect created");
     }
 
     ~FakeConstantForceEffect()
     {
-        send_ffb_force(0);
+        output_->remove(id_);
         log_message("FakeConstantForceEffect destroyed");
     }
 
@@ -350,6 +515,15 @@ public:
         if (flags & DIEP_GAIN)
             effect->dwGain = gain_;
 
+        if ((flags & DIEP_DIRECTION) && effect->rglDirection && effect->cAxes > 0)
+        {
+            if (effect->dwFlags & (DIEFF_POLAR | DIEFF_SPHERICAL))
+                return DIERR_UNSUPPORTED;
+
+            effect->rglDirection[0] = direction_value_;
+            effect->dwFlags = DIEFF_CARTESIAN;
+        }
+
         if (
             (flags & DIEP_TYPESPECIFICPARAMS) &&
             effect->lpvTypeSpecificParams &&
@@ -376,13 +550,18 @@ public:
         if (!effect)
             return E_POINTER;
 
-        if (flags & DIEP_GAIN)
+        if ((flags & DIEP_GAIN) || flags == 0)
+        {
+            if (effect->dwGain > DI_FFNOMINALMAX)
+                return DIERR_INVALIDPARAM;
+
             gain_ = effect->dwGain;
+        }
 
         // During CreateEffect, games sometimes provide initial parameters
         // without the exact DIEP flags we expect, so inspect the type-specific
         // block whenever it is valid.
-        if (
+        if (((flags & DIEP_TYPESPECIFICPARAMS) || flags == 0) &&
             effect->lpvTypeSpecificParams &&
             effect->cbTypeSpecificParams >= sizeof(DICONSTANTFORCE)
         )
@@ -395,15 +574,24 @@ public:
             magnitude_ = force->lMagnitude;
         }
 
-        LONG direction = 0;
-
-        if (
-            effect->cAxes > 0 &&
-            effect->rglDirection
-        )
+        if (((flags & DIEP_DIRECTION) || flags == 0) &&
+            effect->cAxes > 0 && effect->rglDirection)
         {
-            direction = effect->rglDirection[0];
+            if (effect->dwFlags & DIEFF_CARTESIAN)
+            {
+                direction_value_ = effect->rglDirection[0];
+                direction_sign_ = direction_value_ < 0 ? -1 : 1;
+            }
+            else
+            {
+                // A single-axis polar/spherical array does not encode the
+                // steering sign. Keep the old signed-magnitude convention.
+                direction_value_ = 1;
+                direction_sign_ = 1;
+            }
         }
+
+        output_->set_parameters(id_, magnitude_, gain_, direction_sign_);
 
         // Games may update force parameters every frame. Keep the diagnostic
         // useful without opening and appending to the log file at frame rate.
@@ -416,7 +604,7 @@ public:
                 magnitude_,
                 gain_,
                 effect->cAxes,
-                direction,
+                direction_value_,
                 flags
             );
 
@@ -425,17 +613,12 @@ public:
 
         if (flags & DIEP_START)
         {
-            playing_ = true;
+            output_->set_playing(id_, true);
 
             log_message(
                 "Effect started via DIEP_START: magnitude=%ld",
                 magnitude_
             );
-        }
-
-        if (playing_)
-        {
-            send_ffb_force(magnitude_);
         }
 
         return DI_OK;
@@ -447,7 +630,7 @@ public:
         DWORD flags
     ) override
     {
-        playing_ = true;
+        output_->set_playing(id_, true);
 
         log_message(
             "Effect Start: magnitude=%ld gain=%lu iterations=%lu flags=0x%08lX",
@@ -457,17 +640,13 @@ public:
             flags
         );
 
-         send_ffb_force(magnitude_);
-
         return DI_OK;
     }
 
 
     HRESULT STDMETHODCALLTYPE Stop() override
     {
-        playing_ = false;
-
-        send_ffb_force(0);
+        output_->set_playing(id_, false);
 
         log_message("Effect Stop");
 
@@ -482,7 +661,7 @@ public:
         if (!status)
             return E_POINTER;
 
-        *status = playing_ ? DIEGES_PLAYING : 0;
+        *status = output_->is_playing(id_) ? DIEGES_PLAYING : 0;
 
         return DI_OK;
     }
@@ -497,9 +676,7 @@ public:
 
     HRESULT STDMETHODCALLTYPE Unload() override
     {
-        playing_ = false;
-
-        send_ffb_force(0);
+        output_->set_playing(id_, false);
 
         log_message("Effect Unload");
 
@@ -520,8 +697,10 @@ private:
 
     LONG magnitude_ = 0;
     DWORD gain_ = DI_FFNOMINALMAX;
-
-    bool playing_ = false;
+    LONG direction_value_ = 1;
+    int direction_sign_ = 1;
+    std::shared_ptr<ForceOutput> output_;
+    uint64_t id_;
     ULONGLONG last_parameter_log_ms_ = 0;
 };
 
@@ -679,7 +858,7 @@ public:
 
 
     explicit G25DeviceProxy(Base* real)
-        : real_(real)
+        : real_(real), output_(shared_output())
     {
         log_message(
             "G25DeviceProxy created (%s)",
@@ -890,7 +1069,7 @@ public:
             auto* value =
                 reinterpret_cast<LPDIPROPDWORD>(header);
 
-            value->dwData = ff_gain_;
+            value->dwData = output_->device_gain();
 
             log_message("GetProperty: DIPROP_FFGAIN");
 
@@ -941,11 +1120,14 @@ public:
             const auto* value =
                 reinterpret_cast<const DIPROPDWORD*>(header);
 
-            ff_gain_ = value->dwData;
+            if (value->dwData > DI_FFNOMINALMAX)
+                return DIERR_INVALIDPARAM;
+
+            output_->set_device_gain(value->dwData);
 
             log_message(
                 "SetProperty: DIPROP_FFGAIN = %lu",
-                ff_gain_
+                value->dwData
             );
 
             return DI_OK;
@@ -1141,10 +1323,17 @@ public:
         log_message("CreateEffect: GUID_ConstantForce");
 
         auto* fake =
-            new FakeConstantForceEffect();
+            new FakeConstantForceEffect(output_);
 
         if (effect)
-            fake->SetParameters(effect, 0);
+        {
+            HRESULT hr = fake->SetParameters(effect, 0);
+            if (FAILED(hr))
+            {
+                fake->Release();
+                return hr;
+            }
+        }
 
         *out = fake;
 
@@ -1211,9 +1400,7 @@ public:
         if (!state)
             return E_POINTER;
 
-        *state =
-            DIGFFS_POWERON |
-            DIGFFS_ACTUATORSON;
+        *state = output_->feedback_state();
 
         return DI_OK;
     }
@@ -1228,6 +1415,7 @@ public:
             flags
         );
 
+        output_->command(flags);
         return DI_OK;
     }
 
@@ -1397,10 +1585,10 @@ private:
 
 
     Base* real_ = nullptr;
+    std::shared_ptr<ForceOutput> output_;
 
     volatile LONG ref_count_ = 1;
 
-    DWORD ff_gain_ = DI_FFNOMINALMAX;
     DWORD autocenter_ = DIPROPAUTOCENTER_OFF;
 };
 

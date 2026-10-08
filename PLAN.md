@@ -26,6 +26,10 @@ The current branch extends that architecture with:
 - automated effect tests and Windows x86/x64 CI builds;
 - retained local proxy path for per-game compatibility fallback.
 
+On October 8, 2026, the project owner confirmed gameplay validation of the registered-driver branch in Live for Speed, iRacing, and Richard Burns Rally. This establishes game-use validation; the targeted startup/restart/disconnect checks below remain separate acceptance work.
+
+The integrated fallback proxy now includes simultaneous constant-force mixing, device/effect gain, Cartesian direction handling, a 25 ms heartbeat, and its x86 build/test workflow. The registered service retains the latest final-output low-pass smoothing from commit `295b122`, with immediate safety/lifecycle neutralization. The fallback's new behavior still needs targeted physical-wheel checks; it remains constant-force-only with incomplete duration/envelope/reset semantics.
+
 ## Phase 0 — Hardware proof: complete
 
 - [x] Detect Logitech VID `046D` and G25 PIDs `C294`/`C299`.
@@ -40,7 +44,7 @@ The current branch extends that architecture with:
 - [x] Keep the physical HID input path rather than introducing a virtual controller.
 - [x] Keep custom code focused on G25 initialization/range/FFB.
 
-## Phase 2 — Install-once DirectInput driver: implementation complete, validation in progress
+## Phase 2 — Install-once DirectInput driver: implementation and gameplay validation complete, lifecycle checks remain
 
 - [x] Register an OEM force-feedback COM driver for `VID_046D&PID_C299`.
 - [x] Build separate Win32 and x64 DLLs.
@@ -48,6 +52,7 @@ The current branch extends that architecture with:
 - [x] Keep the game-side driver hardware-free; forward state to the service only.
 - [x] Preserve the original local `dinput8.dll` compatibility path.
 - [x] Add reversible per-user registry install/uninstall.
+- [x] Confirm gameplay in LFS, iRacing, and RBR (owner report, October 8, 2026).
 - [ ] Confirm the registered path enumerates cleanly in `joy.cpl` / DirectInput probes.
 - [ ] Validate RBR startup/re-detect/restart behavior against the local-proxy baseline.
 - [ ] Validate LFS repeatedly without a local proxy DLL.
@@ -86,6 +91,7 @@ Effect semantics:
 - [x] Inertia based on wheel acceleration.
 - [x] Friction based on wheel movement direction.
 - [x] Unit tests covering all 12 effect classes.
+- [x] Preserve final-output smoothing and add hardware-free regression tests for signed steps, small sustained force, and immediate neutralization.
 - [ ] Tune derivative filtering/scaling on real G25 hardware.
 - [ ] Compare physical feel against known-good Logitech/LFS behavior.
 - [ ] Capture game-specific effect traffic for RBR/LFS and correct edge cases.
@@ -97,10 +103,15 @@ Effect semantics:
 - [ ] Persist steering range and user settings.
 - [ ] Add bounded diagnostic logging for driver IPC and effect lifecycle.
 - [ ] Add service reconnect/state-replay if the service restarts while a game is still open.
+- [ ] Harden registry backup/restore error handling and partial-install rollback before installer release.
 - [x] Add reproducible x86/x64 driver CI builds.
 - [ ] Add release artifacts containing service + x86/x64 DLLs + installer.
 - [ ] Establish signing/release strategy.
 - [ ] Add a small tray/control UI after runtime behavior is stable.
+
+## Next development milestone — Minimal Windows installer
+
+Package the service and HID runtime into an executable, start it at Windows sign-in, persist steering range, and install both registered-driver DLLs in stable locations. Include upgrade/uninstall behavior that restores prior registration. Validate a fresh install, reboot, unplug/replug, service restart, upgrade, and uninstall on Windows without Python or development tools. Keep the established registered-driver force rendering and smoothing as the gameplay baseline.
 
 ## Hardware validation checklist
 

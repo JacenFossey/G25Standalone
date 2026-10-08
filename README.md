@@ -20,7 +20,9 @@ The service remains the single owner of the physical wheel. It:
 - retains the original local-proxy UDP path as a fallback;
 - neutralizes force on shutdown, disconnect, or loss of the legacy proxy.
 
-The original local proxy has already been exercised successfully in Richard Burns Rally and Colin McRae Rally 2.0. The new registered-driver path is under active hardware validation.
+The original local proxy has already been exercised successfully in Richard Burns Rally and Colin McRae Rally 2.0. On October 8, 2026, the project owner confirmed gameplay validation of the registered-driver branch in Live for Speed, iRacing, and Richard Burns Rally. Targeted lifecycle checks and installer validation remain outstanding; this is not yet an installer-ready release.
+
+Final force output uses the latest low-pass smoothing before conversion to the G25's 8-bit command, rather than the earlier stair-step hysteresis. Safety/lifecycle neutralization bypasses smoothing and returns to zero immediately.
 
 ## Supported DirectInput effects
 
@@ -117,6 +119,8 @@ build.bat
 
 Copy `native\dinput8\build\dinput8.dll` beside the 32-bit game's real executable and run the normal G25 service. The proxy forwards constant-force samples over UDP `127.0.0.1:26725`.
 
+The proxy mixes simultaneous constant-force effects, applies effect/device gain and Cartesian direction, and sends a 25 ms heartbeat to keep sustained effects alive under the service's 150 ms watchdog. Rebuild and replace existing game-folder DLLs to use these changes. The fallback still supports constant force only and does not implement the registered path's full duration/envelope/reset semantics.
+
 When a registered-driver client is active, the service gives it priority over legacy proxy packets.
 
 ## Architecture
@@ -153,6 +157,8 @@ python -m unittest discover -s tests -v
 ```
 
 GitHub Actions builds the registered DLL for both Win32 and x64 and runs the Python effect tests.
+
+The Python suite also checks signed force smoothing, small sustained forces, and immediate neutralization using mocked HID output. The separate Native proxy workflow builds and tests the x86 fallback; locally, run `native\dinput8\test.bat` from that directory in an x86 Native Tools prompt.
 
 ## Safety and limitations
 
