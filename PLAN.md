@@ -100,8 +100,12 @@ Effect semantics:
 
 - [ ] Turn the Python service into a packaged background Windows process/service.
 - [ ] Start automatically at sign-in/boot with clean shutdown behavior.
-- [ ] Persist steering range and user settings.
-- [ ] Add bounded diagnostic logging for driver IPC and effect lifecycle.
+- [x] Persist steering range with validated, atomic per-user settings; session overrides do not overwrite it.
+- [x] Add rotating runtime/HID lifecycle logs and foreground/background logging modes.
+- [ ] Extend bounded diagnostics to driver IPC and effect lifecycle.
+- [x] Add single-instance protection and status/start/stop management commands.
+- [x] Request cooperative neutralization on stop, signals, and confirmed Windows session end.
+- [ ] Confirm background stop and Windows sign-out/shutdown on the physical G25 (automated coverage uses mocked HID).
 - [ ] Add service reconnect/state-replay if the service restarts while a game is still open.
 - [ ] Harden registry backup/restore error handling and partial-install rollback before installer release.
 - [x] Add reproducible x86/x64 driver CI builds.
@@ -112,6 +116,13 @@ Effect semantics:
 ## Next development milestone — Minimal Windows installer
 
 Package the service and HID runtime into an executable, start it at Windows sign-in, persist steering range, and install both registered-driver DLLs in stable locations. Include upgrade/uninstall behavior that restores prior registration. Validate a fresh install, reboot, unplug/replug, service restart, upgrade, and uninstall on Windows without Python or development tools. Keep the established registered-driver force rendering and smoothing as the gameplay baseline.
+
+Implementation sequence:
+
+1. Background runtime management: persistent range, rotating logs, single instance, process commands, and cooperative shutdown. Keep force rendering/conversion/smoothing unchanged. This step is implemented on `feat/background-runtime`; acceptance testing on physical hardware remains.
+2. Packaged executable: bundle Python/HID dependencies and verify on Windows without development tools.
+3. Per-user installer: driver registration, optional sign-in startup, clean upgrades/uninstall, and registry backup/rollback hardening.
+4. Release pipeline and installed-game acceptance in LFS, iRacing, and RBR.
 
 ## Hardware validation checklist
 

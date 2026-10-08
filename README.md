@@ -64,11 +64,41 @@ pip install -r requirements.txt
 py .\src\g25_service.py
 ```
 
-The default steering range is 900 degrees. For another range:
+With no saved setting, steering range defaults to 900 degrees. For a temporary override:
 
 ```powershell
 py .\src\g25_service.py --range 540
 ```
+
+## Background runtime and settings
+
+The runtime can now be managed without keeping a console open:
+
+```powershell
+py .\src\g25_service.py settings --range 540
+py .\src\g25_service.py start
+py .\src\g25_service.py status
+py .\src\g25_service.py stop
+```
+
+| Command | Behavior |
+| --- | --- |
+| No command, or `run` | Run in the foreground; Ctrl+C requests a clean stop. |
+| `start` | Launch a background process with no console and return its status. Repeating this command returns the existing process's status. |
+| `status` | Report process state, wheel state, active steering range, PID, and log path. A running process can be waiting for a wheel; `ready` means the output device was initialized. |
+| `stop` | Request cooperative shutdown and wait for hardware cleanup and release of the instance lock. An unresponsive process is not force-killed. |
+| `settings` | Show the saved settings and their location. |
+| `settings --range 540` | Save a range from 40–900 degrees for the next start. This does not change an active session. |
+
+`run --range 540` and `start --range 540` override the saved range for that session only. To apply a saved change, close the game, run `stop`, then `start`, and reopen the game. Restarting the background process while a game remains open does not yet replay its downloaded force effects.
+
+Settings are stored in `%LOCALAPPDATA%\G25Standalone\settings.json`. Runtime logs are stored in `%LOCALAPPDATA%\G25Standalone\logs\g25.log`, with three rotated backups and a 1 MiB rotation threshold. Existing driver-registration backups in the same application data directory are preserved. Corrupt or unsupported settings cause a startup error instead of being overwritten; correct the settings file before starting again.
+
+Only one managed process can use a data directory. Exit codes are `0` for successful commands, `1` for errors, `2` for an attempted duplicate `run`, and `3` when `status` finds no responding runtime. `stop` succeeds if no process owns the runtime lock; a stale status file does not authorize terminating a PID. Startup/stop waits are bounded, and failures point to diagnostics rather than silently claiming success.
+
+Windows sign-out/shutdown notifications request the same cooperative cleanup as `stop`. Forced process termination, power loss, and device failure cannot guarantee a final HID write; use the management command for routine stopping. The automated shutdown tests use mocked HID output, so physical-wheel sign-out behavior remains an acceptance check.
+
+This step adds process management. Python is still required, automatic sign-in startup is not installed yet, and the executable/installer are the next two development steps. `--data-dir PATH` is available for isolated development/tests; normal use should keep the default so all commands address the same instance.
 
 ## Build the install-once DirectInput driver
 

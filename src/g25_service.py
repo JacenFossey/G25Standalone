@@ -14,18 +14,21 @@ not behave correctly with an OEM FFB driver.
 from __future__ import annotations
 
 import argparse
-import signal
+import json
 import socket
 import struct
 import sys
 import time
 from dataclasses import dataclass
 from enum import Enum, auto
-
-import hid
+from pathlib import Path
 
 from ffb_engine import EffectEngine, WheelKinematics
 from ffb_server import FfbServer, HOST as DRIVER_HOST, PORT as DRIVER_PORT
+from g25_runtime import (
+    LOG, AlreadyRunning, Runtime, data_directory, launch_background,
+    load_settings, query_status, save_range, stop_process,
+)
 
 LOGITECH_VID = 0x046D
 G25_LEGACY_PID = 0xC294
@@ -67,35 +70,34 @@ class G25Device:
     info: dict | None = None
 
 
-_running = True
-
-
-def request_stop(signum=None, frame=None) -> None:
-    del signum, frame
-    global _running
-    _running = False
-
-
 def clamp(value: int, low: int, high: int) -> int:
     return max(low, min(high, value))
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run a Logitech G25 on modern Windows without Logitech Gaming Software."
     )
+    parser.add_argument("action", nargs="?", default="run",
+                        choices=("run", "start", "status", "stop", "settings"))
+    parser.add_argument("--data-dir", type=Path, help="override the per-user data directory")
+    parser.add_argument("--background", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
         "--range",
         dest="range_degrees",
         type=int,
-        default=DEFAULT_RANGE_DEGREES,
-        help=f"steering range in degrees ({MIN_RANGE_DEGREES}-{MAX_RANGE_DEGREES})",
+        default=None,
+        help=f"range override for run/start, or saved range for settings ({MIN_RANGE_DEGREES}-{MAX_RANGE_DEGREES})",
     )
-    args = parser.parse_args()
-    if not MIN_RANGE_DEGREES <= args.range_degrees <= MAX_RANGE_DEGREES:
+    args = parser.parse_args(argv)
+    if args.range_degrees is not None and not MIN_RANGE_DEGREES <= args.range_degrees <= MAX_RANGE_DEGREES:
         parser.error(
             f"--range must be between {MIN_RANGE_DEGREES} and {MAX_RANGE_DEGREES} degrees"
         )
+    if args.range_degrees is not None and args.action not in ("run", "start", "settings"):
+        parser.error("--range is only available with run, start, or settings")
+    if args.background and args.action != "run":
+        parser.error("--background is only available with run")
     return args
 
 
@@ -144,25 +146,26 @@ def send_report_once(device_info: dict, report: bytes) -> int:
             pass
 
 
-def switch_to_native_mode(device_info: dict) -> bool:
+def switch_to_native_mode(device_info: dict, runtime: Runtime) -> bool:
     try:
         written = send_report_once(device_info, ENTER_NATIVE_MODE_REPORT)
         if written <= 0:
-            print("[G25] Native-mode command was not accepted.")
+            LOG.warning("Native-mode command was not accepted")
             return False
-        print(f"[G25] Sent native-mode command ({written} bytes).")
+        LOG.info("Sent native-mode command (%s bytes)", written)
     except OSError as exc:
         # Re-enumeration can invalidate the old handle immediately after success.
-        print(f"[G25] C294 handle changed during mode switch: {exc}")
+        LOG.info("C294 handle changed during mode switch: %s", exc)
 
-    print("[G25] Waiting for C299 native mode...")
+    LOG.info("Waiting for C299 native mode")
     deadline = time.monotonic() + REENUMERATION_TIMEOUT_SECONDS
-    while _running and time.monotonic() < deadline:
+    while not runtime.should_stop() and time.monotonic() < deadline:
         if find_hid_device(G25_NATIVE_PID) is not None:
-            print("[G25] Native mode ready: 046D:C299.")
+            LOG.info("Native mode ready: 046D:C299")
             return True
-        time.sleep(0.20)
-    print("[G25] Timed out waiting for C299.")
+        runtime.stop_event.wait(0.20)
+    if not runtime.should_stop():
+        LOG.warning("Timed out waiting for C299")
     return False
 
 
@@ -193,13 +196,13 @@ class G25Output:
             self.device = device
             self.path = device_info["path"]
             self._write(make_range_report(range_degrees))
-            print(f"[G25] Steering range set to {range_degrees}°.")
+            LOG.info("Steering range set to %s degrees", range_degrees)
             self._write(STOP_ALL_REPORT)
             self._write(DEFAULT_SPRING_OFF_REPORT)
             self._write(make_force_report_byte(G25_FORCE_NEUTRAL_BYTE))
             self.current_force_byte = G25_FORCE_NEUTRAL_BYTE
             self.filtered_force = 0.0
-            print("[G25] Force-feedback output ready.")
+            LOG.info("Force-feedback output ready")
         except Exception:
             try:
                 device.close()
@@ -288,19 +291,15 @@ def receive_latest_legacy_force(sock: socket.socket) -> int | None:
     return None if latest is None else clamp(latest, -10000, 10000)
 
 
-def main() -> int:
-    args = parse_args()
-    signal.signal(signal.SIGINT, request_stop)
-    if hasattr(signal, "SIGTERM"):
-        signal.signal(signal.SIGTERM, request_stop)
+def run_service(runtime: Runtime) -> int:
+    # Management commands must work without importing a native HID dependency.
+    global hid
+    import hid
 
     try:
         legacy_socket = create_legacy_ffb_socket()
     except OSError as exc:
-        print(
-            f"Could not bind legacy FFB UDP {LEGACY_FFB_HOST}:{LEGACY_FFB_PORT}: {exc}",
-            file=sys.stderr,
-        )
+        LOG.error("Could not bind legacy FFB UDP %s:%s: %s", LEGACY_FFB_HOST, LEGACY_FFB_PORT, exc)
         return 1
 
     engine = EffectEngine()
@@ -308,22 +307,16 @@ def main() -> int:
         driver_server = FfbServer(engine)
     except OSError as exc:
         legacy_socket.close()
-        print(
-            f"Could not bind DirectInput driver IPC {DRIVER_HOST}:{DRIVER_PORT}: {exc}",
-            file=sys.stderr,
-        )
+        LOG.error("Could not bind DirectInput driver IPC %s:%s: %s", DRIVER_HOST, DRIVER_PORT, exc)
         return 1
 
     kinematics = WheelKinematics()
     output = G25Output()
 
-    print("G25Standalone — G25 service")
-    print("---------------------------")
-    print(f"Steering range: {args.range_degrees}°")
-    print(f"Registered DirectInput driver: {DRIVER_HOST}:{DRIVER_PORT}")
-    print(f"Legacy dinput8 proxy: {LEGACY_FFB_HOST}:{LEGACY_FFB_PORT}")
-    print("Watching for Logitech G25. Press Ctrl+C to stop.")
-    print()
+    LOG.info("Registered DirectInput driver: %s:%s", DRIVER_HOST, DRIVER_PORT)
+    LOG.info("Legacy dinput8 proxy: %s:%s", LEGACY_FFB_HOST, LEGACY_FFB_PORT)
+    LOG.info("Watching for Logitech G25")
+    runtime.update(state="waiting", wheel="disconnected")
 
     last_state = None
     next_device_poll = 0.0
@@ -332,7 +325,7 @@ def main() -> int:
     legacy_force_at = 0.0
 
     try:
-        while _running:
+        while not runtime.should_stop():
             now = time.monotonic()
 
             # Process lifecycle/effect messages from all game processes.
@@ -363,8 +356,9 @@ def main() -> int:
 
                     output.set_force(desired_force, immediate=not force_active)
                 except OSError as exc:
-                    print(f"[G25] Runtime HID failure: {exc}", file=sys.stderr)
+                    LOG.warning("Runtime HID failure: %s", exc)
                     output.close(send_stop=False)
+                    runtime.update(state="waiting", wheel="unavailable")
                     next_device_poll = 0.0
 
             if now >= next_device_poll:
@@ -372,24 +366,26 @@ def main() -> int:
                 try:
                     detected = detect_g25()
                 except Exception as exc:
-                    print(f"[G25] Detection error: {exc}", file=sys.stderr)
+                    LOG.warning("Detection error: %s", exc)
                     detected = G25Device(WheelState.DISCONNECTED)
 
                 if detected.state != last_state:
                     if detected.state is WheelState.DISCONNECTED:
-                        print("[G25] Disconnected. Waiting...")
+                        LOG.info("Disconnected; waiting")
                     elif detected.state is WheelState.LEGACY:
-                        print("[G25] Connected in compatibility mode: 046D:C294.")
+                        LOG.info("Connected in compatibility mode: 046D:C294")
                     else:
-                        print("[G25] Connected in native mode: 046D:C299.")
+                        LOG.info("Connected in native mode: 046D:C299")
                     last_state = detected.state
 
                 if detected.state is WheelState.DISCONNECTED:
                     output.close(send_stop=False)
+                    runtime.update(state="waiting", wheel="disconnected")
                 elif detected.state is WheelState.LEGACY:
                     output.close(send_stop=False)
+                    runtime.update(state="initializing", wheel="compatibility")
                     if now >= retry_after:
-                        if switch_to_native_mode(detected.info or {}):
+                        if switch_to_native_mode(detected.info or {}, runtime):
                             next_device_poll = 0.0
                         else:
                             retry_after = time.monotonic() + RETRY_INTERVAL_SECONDS
@@ -399,25 +395,69 @@ def main() -> int:
                     needs_open = not output.connected or output.path != current_path
                     if needs_open and now >= retry_after:
                         try:
-                            output.open(info, args.range_degrees)
-                            print("[G25] Ready.")
+                            output.open(info, runtime.steering_range)
+                            LOG.info("Ready")
+                            runtime.update(state="ready", wheel="native")
                         except OSError as exc:
-                            print(f"[G25] Could not initialize native output: {exc}", file=sys.stderr)
+                            LOG.warning("Could not initialize native output: %s", exc)
                             output.close(send_stop=False)
+                            runtime.update(state="waiting", wheel="unavailable")
                             retry_after = time.monotonic() + RETRY_INTERVAL_SECONDS
 
+            # Preserve the validated renderer's sleep timing. Event waits use a
+            # different Windows timer path; cooperative stop is checked above.
             time.sleep(MAIN_LOOP_SLEEP_SECONDS)
 
     except KeyboardInterrupt:
-        request_stop()
+        runtime.request_stop("keyboard interrupt")
     finally:
-        print("\n[G25] Neutralizing force...")
+        runtime.update(state="stopping")
+        LOG.info("Neutralizing force")
         output.close(send_stop=True)
         driver_server.close()
         legacy_socket.close()
 
-    print("G25Standalone stopped.")
     return 0
+
+
+def emit(value, *, error: bool = False) -> None:
+    stream = sys.stderr if error else sys.stdout
+    if stream is not None:
+        print(json.dumps(value, indent=2) if isinstance(value, dict) else value, file=stream)
+
+
+def main(argv=None) -> int:
+    args = parse_args(argv)
+    try:
+        root = (args.data_dir or data_directory()).expanduser().resolve()
+        if args.action == "status":
+            status = query_status(root)
+            emit(status or {"running": False})
+            return 0 if status else 3
+        if args.action == "stop":
+            stop_process(root)
+            emit("G25Standalone stopped")
+            return 0
+        if args.action == "settings":
+            settings = (load_settings(root) if args.range_degrees is None
+                        else save_range(root, args.range_degrees))
+            emit({**settings, "settings_file": str(root / "settings.json"),
+                  "applies": "next start"})
+            return 0
+        if args.action == "start":
+            emit(launch_background(root, args.range_degrees))
+            return 0
+        settings = load_settings(root)
+        steering_range = (settings["steering_range"] if args.range_degrees is None
+                          else args.range_degrees)
+        with Runtime(root, steering_range, args.background) as runtime:
+            return run_service(runtime)
+    except AlreadyRunning as exc:
+        emit(str(exc), error=True)
+        return 2
+    except (OSError, ValueError, RuntimeError, ImportError) as exc:
+        emit(str(exc), error=True)
+        return 1
 
 
 if __name__ == "__main__":
