@@ -80,7 +80,7 @@ def clamp(value: int, low: int, high: int) -> int:
     return max(low, min(high, value))
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run a Logitech G25 on modern Windows without Logitech Gaming Software."
     )
@@ -91,7 +91,7 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_RANGE_DEGREES,
         help=f"steering range in degrees ({MIN_RANGE_DEGREES}-{MAX_RANGE_DEGREES})",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if not MIN_RANGE_DEGREES <= args.range_degrees <= MAX_RANGE_DEGREES:
         parser.error(
             f"--range must be between {MIN_RANGE_DEGREES} and {MAX_RANGE_DEGREES} degrees"
@@ -144,7 +144,7 @@ def send_report_once(device_info: dict, report: bytes) -> int:
             pass
 
 
-def switch_to_native_mode(device_info: dict) -> bool:
+def switch_to_native_mode(device_info: dict, stop_requested=lambda: False) -> bool:
     try:
         written = send_report_once(device_info, ENTER_NATIVE_MODE_REPORT)
         if written <= 0:
@@ -157,7 +157,7 @@ def switch_to_native_mode(device_info: dict) -> bool:
 
     print("[G25] Waiting for C299 native mode...")
     deadline = time.monotonic() + REENUMERATION_TIMEOUT_SECONDS
-    while _running and time.monotonic() < deadline:
+    while _running and not stop_requested() and time.monotonic() < deadline:
         if find_hid_device(G25_NATIVE_PID) is not None:
             print("[G25] Native mode ready: 046D:C299.")
             return True
@@ -288,8 +288,10 @@ def receive_latest_legacy_force(sock: socket.socket) -> int | None:
     return None if latest is None else clamp(latest, -10000, 10000)
 
 
-def main() -> int:
-    args = parse_args()
+def main(argv: list[str] | None = None, *, stop_requested=lambda: False) -> int:
+    global _running
+    _running = True
+    args = parse_args(argv)
     signal.signal(signal.SIGINT, request_stop)
     if hasattr(signal, "SIGTERM"):
         signal.signal(signal.SIGTERM, request_stop)
@@ -332,7 +334,7 @@ def main() -> int:
     legacy_force_at = 0.0
 
     try:
-        while _running:
+        while _running and not stop_requested():
             now = time.monotonic()
 
             # Process lifecycle/effect messages from all game processes.
@@ -389,7 +391,7 @@ def main() -> int:
                 elif detected.state is WheelState.LEGACY:
                     output.close(send_stop=False)
                     if now >= retry_after:
-                        if switch_to_native_mode(detected.info or {}):
+                        if switch_to_native_mode(detected.info or {}, stop_requested):
                             next_device_poll = 0.0
                         else:
                             retry_after = time.monotonic() + RETRY_INTERVAL_SECONDS
@@ -411,10 +413,14 @@ def main() -> int:
     except KeyboardInterrupt:
         request_stop()
     finally:
-        print("\n[G25] Neutralizing force...")
+        # Hardware cleanup comes before diagnostics: logging/disk failures must
+        # never prevent a final neutral/stop command.
         output.close(send_stop=True)
-        driver_server.close()
-        legacy_socket.close()
+        try:
+            driver_server.close()
+        finally:
+            legacy_socket.close()
+        print("\n[G25] Output closed (neutral/stop attempted).")
 
     print("G25Standalone stopped.")
     return 0

@@ -12,12 +12,14 @@ inertia, friction, and custom force.
 from __future__ import annotations
 
 import math
+import logging
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
 DI_MAX = 10_000
 INFINITE = 0xFFFFFFFF
+LOG = logging.getLogger('g25.effects')
 
 EFFECT_CONSTANT = 0
 EFFECT_RAMP = 1
@@ -213,6 +215,8 @@ class EffectEngine:
         if op == "effect":
             effect = Effect.from_message(message)
             old = session.effects.get(effect.effect_id)
+            if old is None:
+                LOG.info('Client %s downloaded effect %s (kind %s).', client_id, effect.effect_id, effect.kind)
             if old is not None:
                 effect.playing = old.playing
                 effect.iterations = old.iterations
@@ -223,7 +227,9 @@ class EffectEngine:
             return
 
         if op == "destroy":
-            session.effects.pop(int(message.get("id", 0)), None)
+            effect_id = int(message.get("id", 0))
+            session.effects.pop(effect_id, None)
+            LOG.info('Client %s destroyed effect %s.', client_id, effect_id)
             return
 
         if op == "start":
@@ -242,6 +248,7 @@ class EffectEngine:
             return
 
         if op == "command":
+            LOG.info('Client %s command: %s.', client_id, message.get('name', ''))
             self._command(session, str(message.get("name", "")))
 
     def _start(self, session: Session, effect_id: int, iterations: int, solo: bool) -> None:

@@ -13,6 +13,9 @@ jobs:
         with:
           python-version: '3.13'
       - run: python -m unittest discover -s tests -v
+      - name: Mocked registry transaction tests (no registry access)
+        shell: powershell
+        run: .\tests\test_registration.ps1
 
   g25ff:
     runs-on: windows-latest
@@ -33,3 +36,27 @@ jobs:
         with:
           name: g25ff-${{ matrix.name }}
           path: build/g25ff-${{ matrix.name }}/Release/g25ff.dll
+
+  standalone:
+    runs-on: windows-latest
+    needs: python-tests
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          architecture: x64
+      - run: python -m pip install -r requirements-build.txt
+      - name: Build and smoke-check standalone installer
+        shell: powershell
+        run: .\scripts\Build-Standalone.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: G25Standalone-unsigned-installer
+          path: dist/installer/*-Setup.exe
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: G25Standalone-folder-bundle
+          path: dist/G25Standalone/
+          if-no-files-found: error

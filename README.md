@@ -41,17 +41,49 @@ The registered driver advertises and implements:
 
 Constant/ramp/periodic/custom effects are synthesized in the service. Spring, damper, inertia, and friction use live wheel position/velocity/acceleration read from the G25 native HID report.
 
-## Requirements
+## Install and use — standalone Windows app
 
-- Windows 11, 64-bit
-- Python 3
-- Microsoft Visual Studio Build Tools 2022 with the C++ workload and Windows SDK
-- CMake 3.24+
-- Logitech G25
+The standalone installer bundles Python, HID support, and both DirectInput driver architectures. End users need only **64-bit Windows 11 and a Logitech G25**—no Python, build tools, or PowerShell commands.
+
+1. Close games and stop any development copy of `g25_service.py` before installing.
+2. Double-click `G25Standalone-0.2.0-Setup.exe` (built below, or obtained from the matching GitHub Actions artifact). The installer is currently **unsigned and experimental**; no public release is published yet.
+3. Leave **Start G25Standalone automatically when I sign in** checked.
+4. Leave **Start G25Standalone now** checked when setup finishes.
+5. Launch a game normally. The app watches for the wheel in the background, even if it was not connected at sign-in.
+
+Start menu → **G25Standalone** provides:
+
+- **Start G25Standalone** — no console window; duplicate launches are ignored.
+- **Stop G25Standalone** — requests graceful force neutralization before exiting.
+- **Edit steering range settings** — opens `settings.json` in Notepad. Set `range_degrees` to an integer from 40 to 900, save, then use Stop and Start to apply it. Restart games after restarting the controller.
+- **Diagnostic logs** — opens `%LOCALAPPDATA%\G25Standalone`. `service.log` (background controller) and `control.log` (install/stop/settings commands) each rotate at 1 MB with three backups. Logging failures cannot prevent force cleanup.
+- **Uninstall G25Standalone** — stops the runtime and restores the pre-first-install registry backup before removing program files.
+
+Installation is per-user and does not require administrator rights. Startup happens **at sign-in**, not before a user logs in. Upgrades retain the original registry backup. Settings, logs, and the original recovery backup remain after uninstall. Close games before upgrading or uninstalling; game processes may still hold the driver DLLs open.
+
+There is no tray icon/control panel yet. Windows Task Manager → Startup apps can disable automatic startup. Do not run the installed app and a development service at the same time.
 
 Do not install a WinUSB/libusb filter driver or use Zadig. G25Standalone relies on the standard Windows HID stack.
 
-## Set up the service
+## Build the standalone installer — developers
+
+Requirements: Python 3 (64-bit), Visual Studio C++ tools and Windows SDK, CMake 3.24+, and Inno Setup 6. PyInstaller is pinned in `requirements-build.txt`.
+
+```powershell
+python -m pip install -r requirements-build.txt
+powershell -ExecutionPolicy Bypass -File .\scripts\Build-Standalone.ps1
+```
+
+Outputs:
+
+- `dist\G25Standalone\` — self-contained folder bundle; keep all files together.
+- `dist\installer\G25Standalone-0.2.0-Setup.exe` — per-user installer.
+
+`-SkipInstaller` builds/checks the folder bundle without Inno Setup. `-Python`, `-CMake`, `-ISCC`, and `-Version` override build inputs. The smoke check imports bundled HID support and verifies both driver architectures **without opening the wheel or modifying registration**.
+
+GitHub Actions also produces unsigned installer and folder-bundle artifacts. Creating/publishing a release and signing the installer are separate steps, gated on hardware validation.
+
+## Set up the service — source/development
 
 ```powershell
 cd C:\Dev\G25Standalone
@@ -152,7 +184,15 @@ Run the effect-engine tests with:
 python -m unittest discover -s tests -v
 ```
 
-GitHub Actions builds the registered DLL for both Win32 and x64 and runs the Python effect tests.
+GitHub Actions builds both registered DLL architectures, runs Python and mocked PowerShell registration tests, and builds/smoke-checks the standalone installer. The lifecycle integration tests use isolated named Windows objects and synthetic processes, not the physical wheel.
+
+For the mocked registry transaction tests:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tests\test_registration.ps1
+```
+
+Before release, test the installer on a clean Windows user account: install, check sign-in startup, exercise Start/Stop, upgrade, and uninstall; verify that the original registry state is restored. Then follow the hardware checklist in `PLAN.md`.
 
 ## Safety and limitations
 
@@ -161,5 +201,7 @@ GitHub Actions builds the registered DLL for both Win32 and x64 and runs the Pyt
 - The 12 effects are implemented, but their exact physical feel still needs game-by-game tuning, especially inertia/friction derivative scaling.
 - The application-local proxy is intentionally retained because some older games may depend on DirectInput behavior that a registered OEM effect driver cannot perfectly reproduce.
 - Do not send arbitrary HID reports to the wheel.
+- Restart games after restarting the app: reconnect/state replay for already-open games is not implemented yet.
+- Stop requests neutralization before exit; the hidden Windows session-notification window also requests it during normal sign-out/shutdown. Session-end cleanup is best-effort and needs hardware validation. Forcibly terminating the app or losing power does not guarantee a final HID stop command. Avoid killing the controller while torque is active.
 
 See [PLAN.md](PLAN.md) for the development roadmap and validation checklist.

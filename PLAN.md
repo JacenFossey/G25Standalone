@@ -92,15 +92,33 @@ Effect semantics:
 
 ## Phase 4 — Reliability and packaging
 
-- [ ] Turn the Python service into a packaged background Windows process/service.
-- [ ] Start automatically at sign-in/boot with clean shutdown behavior.
-- [ ] Persist steering range and user settings.
-- [ ] Add bounded diagnostic logging for driver IPC and effect lifecycle.
+- [x] Bundle the Python service/HID runtime as a windowless Windows background process.
+- [x] Add per-user installer, default sign-in startup, and Start/Stop shortcuts.
+- [x] Add single-instance ownership and graceful stop before upgrade/uninstall.
+- [x] Persist steering range in per-user settings with validation.
+- [x] Add bounded diagnostic logging for driver IPC and effect lifecycle.
+- [x] Preserve pre-first-install registry backups across upgrades with rollback on registration errors.
+- [x] Add hardware-free IPC, output safety, Windows lifecycle, and mocked registry transaction tests.
+- [ ] Validate install/sign-in/upgrade/uninstall on a clean Windows account, including sign-out during active force.
 - [ ] Add service reconnect/state-replay if the service restarts while a game is still open.
 - [x] Add reproducible x86/x64 driver CI builds.
-- [ ] Add release artifacts containing service + x86/x64 DLLs + installer.
-- [ ] Establish signing/release strategy.
+- [x] Define CI artifacts containing bundled runtime + x86/x64 DLLs + unsigned installer.
+- [ ] Publish a release after installer and physical-wheel validation.
+- [ ] Establish signing/release strategy (initial test artifacts are unsigned).
 - [ ] Add a small tray/control UI after runtime behavior is stable.
+
+## Standalone installer validation checklist
+
+1. Build the folder bundle and installer; package smoke check must pass without hardware/registry I/O.
+2. On a clean Windows user account, install without elevation and leave sign-in startup enabled.
+3. Verify bundled runtime runs without installed Python/build tools or a console window.
+4. Launch Start twice; confirm only one controller owns the wheel.
+5. Use Stop during low force; verify immediate neutralization and process exit.
+6. Edit steering range settings, Stop/Start, and confirm the persisted range.
+7. Sign out/in and confirm automatic startup; check the log after startup failures.
+8. Upgrade with games closed; confirm original registry backups and settings are retained.
+9. Uninstall; confirm startup entry/shortcuts/program files are removed and pre-first-install registry state restored.
+10. Exercise error paths (missing backup, failed registration, stop timeout); do not delete program files when safe cleanup cannot be completed.
 
 ## Hardware validation checklist
 

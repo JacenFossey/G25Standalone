@@ -8,6 +8,7 @@ semantics, while the service owns effect rendering and all hardware I/O.
 from __future__ import annotations
 
 import json
+import logging
 import selectors
 import socket
 from dataclasses import dataclass, field
@@ -18,6 +19,7 @@ from ffb_engine import EffectEngine
 HOST = "127.0.0.1"
 PORT = 26726
 MAX_LINE = 1_000_000
+LOG = logging.getLogger('g25.ipc')
 
 
 @dataclass
@@ -70,6 +72,7 @@ class FfbServer:
             self._next_client_id += 1
             self.clients[client_id] = Client(sock)
             self.engine.connect(client_id)
+            LOG.info('DirectInput client %s connected.', client_id)
             self.selector.register(sock, selectors.EVENT_READ, client_id)
 
     def _read(self, client_id: int) -> None:
@@ -89,12 +92,12 @@ class FfbServer:
             return
 
         client.buffer.extend(data)
-        if len(client.buffer) > MAX_LINE and b"\n" not in client.buffer:
-            self._drop(client_id)
-            return
-
         while True:
             newline = client.buffer.find(b"\n")
+            if newline > MAX_LINE or (newline < 0 and len(client.buffer) > MAX_LINE):
+                LOG.warning('Dropping oversized IPC frame from client %s.', client_id)
+                self._drop(client_id)
+                return
             if newline < 0:
                 break
             raw = bytes(client.buffer[:newline])
@@ -105,9 +108,11 @@ class FfbServer:
                 message: dict[str, Any] = json.loads(raw.decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError):
                 continue
+            if not isinstance(message, dict):
+                continue
             try:
                 self.engine.handle(client_id, message)
-            except (KeyError, TypeError, ValueError):
+            except (KeyError, TypeError, ValueError, AttributeError, OverflowError):
                 # A malformed game-side packet must never take down wheel output.
                 continue
 
@@ -116,6 +121,7 @@ class FfbServer:
         self.engine.disconnect(client_id)
         if client is None:
             return
+        LOG.info('DirectInput client %s disconnected; effects removed.', client_id)
         try:
             self.selector.unregister(client.sock)
         except Exception:
